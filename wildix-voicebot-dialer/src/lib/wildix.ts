@@ -11,7 +11,7 @@
  */
 
 const PBX_HOST         = process.env.WILDIX_PBX_HOST          ?? 'gem.wildixin.com';
-const API_KEY          = process.env.WILDIX_API_KEY            ?? 'access_l6ATnhGjrRtuAz9rSd7SB9j7Put52YgswIgueSQ6mReSFIkS37cC6yMaGlUUoyp9';
+const API_KEY          = process.env.WILDIX_API_KEY            ?? 'access_DOIhBCRY9wWpBgMl0yf4JUNS4orIeJeE9MIcBnfhoC3tdegD1Hi2dh7sJbVcoiM0';
 const VOICEBOT_EXT     = process.env.WILDIX_VOICEBOT_EXTENSION ?? '777';
 
 function getAuthHeader(): string {
