@@ -1,24 +1,21 @@
 /**
  * Wildix WMS PBX API — client lato server
  *
- * Autenticazione: S2S oppure Basic (username:password)
+ * Autenticazione: Bearer API Key
  * Base URL: https://{pbx-host}/api/v1
  *
  * Flusso outbound con voicebot su interno 777:
- *   POST /Originate/Call → PBX chiama il numero destinatario
- *   La chiamata arriva all'interno 777 → deviazione forzata al voicebot AI
+ *   1. POST /Originate/Call/ → PBX chiama il numero destinatario
+ *   2. Webhook call.answered → app trasferisce a interno 777
+ *   3. Voicebot gestisce la conversazione
  */
 
-const PBX_HOST   = process.env.WILDIX_PBX_HOST   ?? 'gem.wildixin.com';
-const APP_ID     = process.env.WILDIX_APP_ID      ?? 's2s-aidialer-0203489001771497745';
-const SECRET_KEY = process.env.WILDIX_SECRET_KEY  ?? 'Fr5dfC*6Ed1Sg#xpmQBzlRsvR2K3yJvmh3*XS*4OL0bEWloqTKCOyGi0D4XSVo58';
-const CALLER_ID  = process.env.WILDIX_CALLER_ID   ?? '';
-
-// Interno da cui parte la chiamata outbound (deve avere deviazione → voicebot)
-const CALLER_EXTENSION = process.env.WILDIX_CALLER_EXTENSION ?? '777';
+const PBX_HOST         = process.env.WILDIX_PBX_HOST          ?? 'gem.wildixin.com';
+const API_KEY          = process.env.WILDIX_API_KEY            ?? 'access_l6ATnhGjrRtuAz9rSd7SB9j7Put52YgswIgueSQ6mReSFIkS37cC6yMaGlUUoyp9';
+const VOICEBOT_EXT     = process.env.WILDIX_VOICEBOT_EXTENSION ?? '777';
 
 function getAuthHeader(): string {
-  return `s2s ${APP_ID}:${SECRET_KEY}`;
+  return `Bearer ${API_KEY}`;
 }
 
 function apiUrl(path: string): string {
@@ -26,99 +23,113 @@ function apiUrl(path: string): string {
 }
 
 // ─── Origina chiamata outbound ────────────────────────────────
-// Il PBX chiama il destinatario dalla extension 777
-// Il dialplan su 777 devia automaticamente al voicebot AI
+// Il PBX chiama il numero esterno; alla risposta viene trasferito a 777
 export async function makeCall(params: {
   callee:    string;                   // numero destinatario E.164
-  caller?:   string;                   // interno (default: CALLER_EXTENSION)
-  callerId?: string;                   // CallerID mostrato al destinatario
+  caller?:   string;                   // non usato con Bearer, lasciato per compatibilità
+  callerId?: string;                   // non usato con questo endpoint
   metadata?: Record<string, unknown>;  // dati arbitrari (non inviati al PBX)
 }): Promise<{ callId: string }> {
-  const caller   = params.caller ?? CALLER_EXTENSION;
-  const callerId = params.callerId ?? CALLER_ID ?? caller;
-
-  // Prova prima con /Originate/Call (API legacy WMS, ampiamente supportata)
-  const body = {
-    channel:  `Local/${params.callee}@users`,
-    exten:    caller,
-    context:  'users',
-    callerid: `"VoiceBot" <${callerId}>`,
-    async:    'true',
-  };
-
-  const res = await fetch(apiUrl('/Originate/Call'), {
-    method:  'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      Authorization:  getAuthHeader(),
-    },
-    body: new URLSearchParams(body).toString(),
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    // Fallback: prova con JSON e endpoint alternativo
-    return makeCallJson(params);
-  }
-
-  const data = await res.text();
-  const callId = `wms_${Date.now()}`;
-  console.log('[wildix] Originate/Call response:', data);
-  return { callId };
-}
-
-// ─── Fallback: JSON API (WMS 6.x+) ───────────────────────────
-async function makeCallJson(params: {
-  callee:    string;
-  caller?:   string;
-  callerId?: string;
-  metadata?: Record<string, unknown>;
-}): Promise<{ callId: string }> {
-  const caller   = params.caller ?? CALLER_EXTENSION;
-  const callerId = params.callerId ?? CALLER_ID ?? caller;
+  console.log('[wildix] makeCall ->', params.callee);
 
   const body = {
-    caller:   caller,
-    callee:   params.callee,
-    callerId: callerId,
+    number: params.callee,
+    name:   'VoiceBot',
   };
 
-  const res = await fetch(apiUrl('/calls'), {
+  console.log('[wildix] POST', apiUrl('/Originate/Call/'), JSON.stringify(body));
+
+  const res = await fetch(apiUrl('/Originate/Call/'), {
     method:  'POST',
     headers: {
       'Content-Type': 'application/json',
+      'Accept':       'application/json',
       Authorization:  getAuthHeader(),
     },
     body: JSON.stringify(body),
   });
 
+  const responseText = await res.text();
+  console.log('[wildix] Originate/Call response:', res.status, responseText);
+
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Wildix makeCall failed [${res.status}]: ${text}`);
+    throw new Error(`Wildix makeCall failed [${res.status}]: ${responseText}`);
   }
 
-  const data = await res.json();
-  return { callId: data?.result?.id ?? data?.id ?? data?.callId ?? `call_${Date.now()}` };
+  let data: any = {};
+  try { data = JSON.parse(responseText); } catch {}
+
+  const callId = data?.result?.id
+    ?? data?.result?.callId
+    ?? data?.id
+    ?? data?.callId
+    ?? `wms_${Date.now()}`;
+
+  console.log('[wildix] callId:', callId);
+  return { callId };
+}
+
+// ─── Trasferisci chiamata all'interno 777 (voicebot) ─────────
+// Chiamato dal webhook wildix-webhook quando arriva call.answered
+export async function transferToVoicebot(callId: string): Promise<void> {
+  console.log('[wildix] transferToVoicebot ->', callId, '→', VOICEBOT_EXT);
+
+  const res = await fetch(apiUrl(`/calls/${callId}/transfer`), {
+    method:  'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept':       'application/json',
+      Authorization:  getAuthHeader(),
+    },
+    body: JSON.stringify({ destination: VOICEBOT_EXT }),
+  });
+
+  const responseText = await res.text();
+  console.log('[wildix] transfer response:', res.status, responseText);
+
+  if (!res.ok) {
+    console.warn('[wildix] transfer failed, trying redirect fallback...');
+    await transferCallFallback(callId, VOICEBOT_EXT);
+  }
+}
+
+// ─── Fallback: redirect ───────────────────────────────────────
+async function transferCallFallback(callId: string, destination: string): Promise<void> {
+  console.log('[wildix] transferCallFallback ->', callId, '→', destination);
+
+  const res = await fetch(apiUrl(`/calls/${callId}/redirect`), {
+    method:  'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept':       'application/json',
+      Authorization:  getAuthHeader(),
+    },
+    body: JSON.stringify({ number: destination }),
+  });
+
+  const responseText = await res.text();
+  console.log('[wildix] redirect response:', res.status, responseText);
+
+  if (!res.ok) {
+    console.warn('[wildix] transferCallFallback also failed (ignored):', responseText);
+  }
 }
 
 // ─── Termina chiamata ─────────────────────────────────────────
 export async function hangupCall(callId: string): Promise<void> {
+  console.log('[wildix] hangupCall ->', callId);
   try {
-    await fetch(apiUrl(`/calls/${callId}`), {
+    const res = await fetch(apiUrl(`/calls/${callId}`), {
       method:  'DELETE',
-      headers: { Authorization: getAuthHeader() },
+      headers: {
+        Authorization: getAuthHeader(),
+        'Accept':      'application/json',
+      },
     });
+    console.log('[wildix] hangup response:', res.status);
   } catch (e) {
     console.warn('[wildix] hangupCall error (ignored):', e);
   }
-}
-
-// ─── Trasferimento (non necessario con deviazione 777) ────────
-export async function transferCall(_params: {
-  callId:      string;
-  destination: string;
-}): Promise<void> {
-  console.log('[wildix] transferCall: gestito dal dialplan su interno 777');
 }
 
 // ─── Stato chiamata ───────────────────────────────────────────
@@ -128,12 +139,26 @@ export async function getCallStatus(callId: string): Promise<{
 }> {
   try {
     const res = await fetch(apiUrl(`/calls/${callId}`), {
-      headers: { Authorization: getAuthHeader() },
+      headers: {
+        Authorization: getAuthHeader(),
+        'Accept':      'application/json',
+      },
     });
     if (!res.ok) return { status: 'unknown' };
     const data = await res.json();
-    return { status: data?.result?.status ?? data?.status ?? 'unknown', duration: data?.result?.duration };
+    return {
+      status:   data?.result?.status ?? data?.status ?? 'unknown',
+      duration: data?.result?.duration,
+    };
   } catch {
     return { status: 'unknown' };
   }
+}
+
+// ─── Trasferimento generico (compatibilità con route.ts) ──────
+export async function transferCall(params: {
+  callId:      string;
+  destination: string;
+}): Promise<void> {
+  await transferToVoicebot(params.callId);
 }
