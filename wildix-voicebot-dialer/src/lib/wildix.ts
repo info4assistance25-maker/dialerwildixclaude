@@ -29,9 +29,10 @@ function apiUrl(path: string): string {
 // Il PBX chiama il destinatario dalla extension 777
 // Il dialplan su 777 devia automaticamente al voicebot AI
 export async function makeCall(params: {
-  callee:    string;   // numero destinatario E.164
-  caller?:   string;   // interno (default: CALLER_EXTENSION)
-  callerId?: string;   // CallerID mostrato al destinatario
+  callee:    string;                   // numero destinatario E.164
+  caller?:   string;                   // interno (default: CALLER_EXTENSION)
+  callerId?: string;                   // CallerID mostrato al destinatario
+  metadata?: Record<string, unknown>;  // dati arbitrari (non inviati al PBX)
 }): Promise<{ callId: string }> {
   const caller   = params.caller ?? CALLER_EXTENSION;
   const callerId = params.callerId ?? CALLER_ID ?? caller;
@@ -71,6 +72,7 @@ async function makeCallJson(params: {
   callee:    string;
   caller?:   string;
   callerId?: string;
+  metadata?: Record<string, unknown>;
 }): Promise<{ callId: string }> {
   const caller   = params.caller ?? CALLER_EXTENSION;
   const callerId = params.callerId ?? CALLER_ID ?? caller;
