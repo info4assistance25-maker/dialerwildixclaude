@@ -1,113 +1,104 @@
 /**
- * Wildix Collaboration API — client lato server
+ * Wildix GEM API — client lato server
  *
- * Documentazione: https://docs.wildix.com/collaboration-api
+ * Autenticazione: S2S (Server-to-Server)
+ *   Header: Authorization: s2s {APP_ID}:{SECRET_KEY}
+ *   Base URL: https://gem.wildixin.com/api/v1
  *
- * Il flusso outbound "attended transfer":
- *  1. POST /calls → PBX fa squillare l'interno dell'operatore (caller)
- *  2. L'operatore risponde → PBX fa squillare il destinatario (callee)
- *  3. Destinatario risponde → evento call.answered
- *  4. L'app fa PUT /calls/{id}/transfer → destinatario viene trasferito al voicebot
- *
- * Oppure flusso "blind" (più semplice per voicebot):
- *  1. POST /calls con callee=voicebot_extension e customCallee=numero_destinatario
- *     (verifica se il tuo PBX supporta questa modalità)
+ * Flusso voicebot outbound:
+ *   POST /VoiceBots/sessions → avvia sessione voicebot verso numero destinatario
+ *   Il voicebot chiama il destinatario e gestisce la conversazione
+ *   Al termine → POST webhook → nostra app /api/voicebot-webhook
  */
 
-const PBX_HOST = process.env.WILDIX_PBX_HOST ?? '';
-const API_KEY  = process.env.WILDIX_API_KEY ?? '';
-const USERNAME = process.env.WILDIX_USERNAME ?? '';
-const PASSWORD = process.env.WILDIX_PASSWORD ?? '';
+const GEM_HOST   = process.env.WILDIX_GEM_HOST   ?? 'gem.wildixin.com';
+const APP_ID     = process.env.WILDIX_APP_ID      ?? 's2s-aidialer-0203489001771497745';
+const SECRET_KEY = process.env.WILDIX_SECRET_KEY  ?? 'Fr5dfC*6Ed1Sg#xpmQBzlRsvR2K3yJvmh3*XS*4OL0bEWloqTKCOyGi0D4XSVo58';
+const BOT_ID     = process.env.WILDIX_BOT_ID      ?? '5jiEMW3bfAVk';
 
 function getAuthHeader(): string {
-  if (API_KEY) {
-    return `Key ${API_KEY}`;
-  }
-  const b64 = Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64');
-  return `Basic ${b64}`;
+  return `s2s ${APP_ID}:${SECRET_KEY}`;
 }
 
 function apiUrl(path: string): string {
-  return `https://${PBX_HOST}/api/v1${path}`;
+  return `https://${GEM_HOST}/api/v1${path}`;
 }
 
-// ─── Avvia chiamata outbound ─────────────────────────────────
+// ─── Avvia sessione voicebot outbound ────────────────────────
+// Il voicebot chiama direttamente il destinatario
 export async function makeCall(params: {
-  caller: string;   // interno operatore (es. "100")
-  callee: string;   // numero destinatario (es. "+393331234567")
-  callerId?: string;
+  callee: string;        // numero destinatario E.164 (es. "+393331234567")
+  callerId?: string;     // CallerID mostrato al destinatario
+  caller?: string;       // non usato in modalità voicebot
+  metadata?: Record<string, string>; // dati extra passati al bot
 }): Promise<{ callId: string }> {
-  const body = {
-    caller:   params.caller,
-    callee:   params.callee,
-    callerId: params.callerId ?? process.env.WILDIX_CALLER_ID,
+  const body: Record<string, unknown> = {
+    botId:  BOT_ID,
+    callee: params.callee,
+    ...(params.callerId ? { callerId: params.callerId } : {}),
+    ...(params.metadata ? { metadata: params.metadata } : {}),
   };
 
-  const res = await fetch(apiUrl('/calls'), {
+  const res = await fetch(apiUrl('/VoiceBots/sessions'), {
     method:  'POST',
     headers: {
-      'Content-Type':  'application/json',
-      Authorization:   getAuthHeader(),
+      'Content-Type': 'application/json',
+      Authorization:  getAuthHeader(),
     },
     body: JSON.stringify(body),
   });
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Wildix makeCall failed [${res.status}]: ${text}`);
+    throw new Error(`Wildix VoiceBot session failed [${res.status}]: ${text}`);
   }
 
   const data = await res.json();
-  // La risposta Wildix ha la forma { id: "...", ... } oppure { callId: "..." }
-  return { callId: data.id ?? data.callId ?? data.call_id };
+  // Risposta attesa: { id: "session-id", ... } o { sessionId: "..." }
+  const sessionId = data?.result?.id ?? data?.id ?? data?.sessionId ?? `session_${Date.now()}`;
+  return { callId: sessionId };
 }
 
-// ─── Trasferisci chiamata a un interno (voicebot) ────────────
-export async function transferCall(params: {
-  callId: string;
-  destination: string; // interno voicebot
-}): Promise<void> {
-  const res = await fetch(apiUrl(`/calls/${params.callId}/transfer`), {
-    method:  'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization:  getAuthHeader(),
-    },
-    body: JSON.stringify({ destination: params.destination }),
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Wildix transferCall failed [${res.status}]: ${text}`);
-  }
-}
-
-// ─── Termina chiamata ────────────────────────────────────────
-export async function hangupCall(callId: string): Promise<void> {
-  const res = await fetch(apiUrl(`/calls/${callId}`), {
+// ─── Termina sessione voicebot ────────────────────────────────
+export async function hangupCall(sessionId: string): Promise<void> {
+  const res = await fetch(apiUrl(`/VoiceBots/sessions/${sessionId}`), {
     method:  'DELETE',
     headers: { Authorization: getAuthHeader() },
   });
 
   if (!res.ok && res.status !== 404) {
     const text = await res.text();
-    throw new Error(`Wildix hangupCall failed [${res.status}]: ${text}`);
+    throw new Error(`Wildix hangupSession failed [${res.status}]: ${text}`);
   }
 }
 
-// ─── Leggi stato chiamata ────────────────────────────────────
-export async function getCallStatus(callId: string): Promise<{
+// ─── Leggi stato sessione ─────────────────────────────────────
+export async function getCallStatus(sessionId: string): Promise<{
   status: string;
   duration?: number;
 }> {
-  const res = await fetch(apiUrl(`/calls/${callId}`), {
+  const res = await fetch(apiUrl(`/VoiceBots/sessions/${sessionId}`), {
     headers: { Authorization: getAuthHeader() },
   });
 
   if (!res.ok) {
-    throw new Error(`Wildix getCallStatus failed [${res.status}]`);
+    throw new Error(`Wildix getSessionStatus failed [${res.status}]`);
   }
 
   const data = await res.json();
-  return { status: data.status, duration: data.duration };
+  return {
+    status:   data?.result?.status ?? data?.status ?? 'unknown',
+    duration: data?.result?.duration ?? data?.duration,
+  };
+}
+
+// ─── Trasferimento non necessario in modalità voicebot puro ──
+// Mantenuto per compatibilità con wildix-webhook/route.ts
+export async function transferCall(_params: {
+  callId: string;
+  destination: string;
+}): Promise<void> {
+  // In modalità voicebot GEM il trasferimento è gestito
+  // direttamente dal bot tramite le sue tool "Call Control"
+  console.log('[wildix] transferCall: no-op in voicebot mode');
 }
