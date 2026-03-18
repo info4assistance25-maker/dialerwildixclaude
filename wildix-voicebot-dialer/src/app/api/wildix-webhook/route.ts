@@ -1,66 +1,60 @@
 /**
- * Webhook Wildix — riceve eventi dal PBX
+ * Webhook Wildix GEM — riceve eventi dalla sessione voicebot
  *
- * Configura in Wildix Admin Panel:
- *   Settings → Webhooks → Add Webhook
- *   URL: https://your-app.vercel.app/api/wildix-webhook
- *   Events: call.answered, call.ended, call.failed
+ * Configura in Wildix GEM → Voicebot → DEMO PRESA APP → Third-party Function:
+ *   URL: https://dialerwildixclaude.vercel.app/api/wildix-webhook
+ *   Method: POST
  *
- * Poi aggiungi WEBHOOK_SECRET nel .env e nel pannello Wildix.
+ * Oppure nei webhook di sistema GEM:
+ *   Settings → Webhooks → URL sopra
+ *
+ * Eventi attesi:
+ *   session.started   → destinatario sta squillando
+ *   session.answered  → destinatario ha risposto, voicebot attivo
+ *   session.ended     → chiamata terminata
+ *   session.failed    → chiamata fallita
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getCallByWildixId, upsertCall } from '@/lib/store';
-import { transferCall } from '@/lib/wildix';
-import type { WildixWebhookPayload } from '@/types';
 
 export async function POST(req: NextRequest) {
   try {
-    // ── Validazione firma (opzionale ma consigliata) ──────────
-    const secret = process.env.WEBHOOK_SECRET;
-    if (secret) {
-      const signature = req.headers.get('x-wildix-signature') ?? '';
-      // TODO: implementa HMAC-SHA256 se Wildix lo supporta
-      // Per ora accettiamo con header custom
-      if (secret !== 'skip' && !signature) {
-        // Non bloccare in dev, solo log
-        console.warn('[wildix-webhook] Firma assente');
-      }
+    const payload = await req.json();
+    const event     = payload.event ?? payload.type ?? '';
+    const sessionId = payload.sessionId ?? payload.id ?? payload.callId ?? '';
+
+    console.log('[wildix-webhook]', event, sessionId, JSON.stringify(payload).slice(0, 200));
+
+    if (!sessionId) {
+      return NextResponse.json({ ok: true, note: 'no sessionId' });
     }
 
-    const payload: WildixWebhookPayload = await req.json();
-    const { event, callId: wildixCallId, timestamp } = payload;
-
-    console.log('[wildix-webhook]', event, wildixCallId);
-
-    const callRecord = getCallByWildixId(wildixCallId);
+    const callRecord = getCallByWildixId(sessionId);
     if (!callRecord) {
-      // Potrebbe essere una chiamata non gestita dall'app
       return NextResponse.json({ ok: true, note: 'call not tracked' });
     }
 
-    switch (event) {
-      case 'call.answered': {
-        const updated = {
-          ...callRecord,
-          status:      'answered' as const,
-          answeredAt:  timestamp,
-        };
-        upsertCall(updated);
+    const timestamp = payload.timestamp ?? new Date().toISOString();
 
-        // Trasferisci al voicebot IVR se configurato
-        const voicebotExtension = process.env.WILDIX_VOICEBOT_EXTENSION;
-        if (voicebotExtension && process.env.VOICEBOT_PROVIDER !== 'vapi') {
-          try {
-            await transferCall({ callId: wildixCallId, destination: voicebotExtension });
-            upsertCall({ ...updated, status: 'voicebot_active' });
-          } catch (e) {
-            console.error('[wildix-webhook] Transfer failed:', e);
-          }
-        }
+    switch (event) {
+      case 'session.started':
+      case 'call.ringing': {
+        upsertCall({ ...callRecord, status: 'ringing' });
         break;
       }
 
+      case 'session.answered':
+      case 'call.answered': {
+        upsertCall({
+          ...callRecord,
+          status:     'voicebot_active',
+          answeredAt: timestamp,
+        });
+        break;
+      }
+
+      case 'session.ended':
       case 'call.ended': {
         const endedAt = timestamp;
         const durationSeconds = callRecord.answeredAt
@@ -69,19 +63,41 @@ export async function POST(req: NextRequest) {
             )
           : undefined;
 
+        // Estrai eventuali dati dalla conversazione
+        const answers  = payload.answers  ?? payload.surveyAnswers ?? undefined;
+        const score    = payload.score    ?? payload.overallScore  ?? undefined;
+        const outcome  = payload.outcome  ?? undefined;
+
         upsertCall({
           ...callRecord,
-          status: callRecord.status === 'ringing' ? 'no_answer' : 'completed',
+          status:          callRecord.status === 'ringing' ? 'no_answer' : 'completed',
           endedAt,
           durationSeconds,
+          ...(answers ? { surveyAnswers: answers } : {}),
+          ...(score   != null ? { overallScore: score } : {}),
+          ...(outcome ? { outcome } : {}),
         });
         break;
       }
 
-      case 'call.failed': {
-        upsertCall({ ...callRecord, status: 'failed', endedAt: timestamp });
+      case 'session.failed':
+      case 'call.failed':
+      case 'call.busy': {
+        upsertCall({
+          ...callRecord,
+          status:  event === 'call.busy' ? 'busy' : 'failed',
+          endedAt: timestamp,
+        });
         break;
       }
+
+      case 'call.no_answer': {
+        upsertCall({ ...callRecord, status: 'no_answer', endedAt: timestamp });
+        break;
+      }
+
+      default:
+        console.log('[wildix-webhook] unhandled event:', event);
     }
 
     return NextResponse.json({ ok: true });
