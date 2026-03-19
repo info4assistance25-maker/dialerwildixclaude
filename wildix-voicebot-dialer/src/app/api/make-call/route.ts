@@ -49,7 +49,7 @@ export async function POST(req: NextRequest) {
       contactName:    contact.name,
       contactPhone:   contact.phone,
       contactCompany: contact.company ?? '',
-      status:         'initiated',
+      status:         'dialing',
       startedAt:      new Date().toISOString(),
     });
 
