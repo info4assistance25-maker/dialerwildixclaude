@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getContacts, addCallRecord } from '@/lib/store';
+import { getContacts, upsertCall } from '@/lib/store';
 
 // URL webhook Make — avvia la chiamata Wildix tramite Make
-const MAKE_WEBHOOK_URL = process.env.MAKE_WEBHOOK_URL
-  ?? 'https://hook.eu1.make.com/kgg5rrcn3p4p5k8hqpj2xg987swczu91';
+const MAKE_WEBHOOK_URL =
+  process.env.MAKE_WEBHOOK_URL ??
+  'https://hook.eu1.make.com/kgg5rrcn3p4p5k8hqpj2xg987swczu91';
 
 export async function POST(req: NextRequest) {
   try {
@@ -25,8 +26,8 @@ export async function POST(req: NextRequest) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        number: contact.phone,
-        name:   contact.name,
+        number:    contact.phone,
+        name:      contact.name,
         callId,
         contactId: contact.id,
       }),
@@ -41,8 +42,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Salva il record della chiamata nello store locale
-    addCallRecord({
+    // Salva il record della chiamata nello store
+    upsertCall({
       id:             callId,
       contactId:      contact.id,
       contactName:    contact.name,
